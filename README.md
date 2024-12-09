@@ -126,12 +126,54 @@ Key implementation snippet:
 
 ```python
 def loss_fn(self, predictions, targets):
-    ...
-    xy_loss = F.mse_loss(pred_bboxes[..., :2][obj_mask & responsible_mask],
-                         true_bboxes[..., :2][obj_mask & responsible_mask], reduction='sum')
-    ...
-    total_loss = bbox_loss + conf_loss + class_loss
-    return total_loss / predictions.shape[0]
+    pred_bboxes, pred_confs, pred_classes, _ = self.destruct(predictions)
+        true_bboxes, true_confs, true_classes, _ = self.destruct(targets)
+
+        iou = self.findIOU(pred_bboxes, true_bboxes)
+        best_iou_mask = self.get_best_iou_mask(iou)
+
+        obj_mask = true_confs > 0 
+        no_obj_mask = ~obj_mask   
+
+        responsible_mask = torch.zeros_like(pred_confs, dtype=torch.bool)
+        responsible_mask.scatter_(-1, best_iou_mask, 1)
+
+        xy_loss = F.mse_loss(
+            pred_bboxes[..., :2][obj_mask & responsible_mask],
+            true_bboxes[..., :2][obj_mask & responsible_mask],
+            reduction='sum'
+        )
+        wh_loss = F.mse_loss(
+            torch.sqrt(torch.clamp(pred_bboxes[..., 2:4][obj_mask & responsible_mask], min=1e-6)),
+            torch.sqrt(torch.clamp(true_bboxes[..., 2:4][obj_mask & responsible_mask], min=1e-6)),
+            reduction='sum'
+        )
+
+        bbox_loss = self.coord_scale * (xy_loss + wh_loss)
+
+        obj_conf_loss = F.mse_loss(
+            pred_confs[obj_mask & responsible_mask],
+            true_confs[obj_mask & responsible_mask],
+            reduction='sum'
+        )
+        
+        no_obj_conf_loss = F.mse_loss(
+            pred_confs[no_obj_mask],
+            true_confs[no_obj_mask],
+            reduction='sum'
+        )
+        conf_loss = obj_conf_loss + self.noobj_scale * no_obj_conf_loss
+
+        grid_obj_mask = obj_mask.any(dim=-1)
+
+        class_loss = F.mse_loss(
+            pred_classes[grid_obj_mask],
+            true_classes[grid_obj_mask],
+            reduction='sum'
+        )
+
+        total_loss = bbox_loss + conf_loss + class_loss
+        return total_loss / predictions.shape[0] 
 ```
 
 ---
